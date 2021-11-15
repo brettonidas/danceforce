@@ -1,125 +1,247 @@
 
-int LedPin = 13;
+const int LedPin = 13;
+bool led = false;
 
 #define BUTTON_DEBUG 1
+//#define THRESH_DEBUG
+
+#define N_DELAY 16
+
+/*
+ * A Delay-line class. Feed samples in, and it comes back out N_DELAY samples later.
+ */
+struct DelayLine
+{
+public:
+  DelayLine()
+  {
+    // Initialize the buffer and index to 0.
+    for (unsigned int i=0; i<N_DELAY; i++)
+      buff[i] = 0;
+    idx = 0;
+  }
+
+  // Disallow copying and assignment. Prevents accidental oopsies.
+  DelayLine(const DelayLine&) = delete;
+  DelayLine & operator=(const DelayLine&) = delete;
+
+  // Pop a value off the delay line, and push a new one one:
+  unsigned int next(unsigned int n)
+  {
+    // Grab the next value off the buffer:
+    unsigned int ret = buff[idx];
+
+    // Put the new value into the buffer:
+    buff[idx] = n;
+
+    // Increment and wrap the index:
+    idx++;
+    if (idx >= N_DELAY)
+      idx = 0;
+    
+    return ret;
+  }
+private:
+  // Index to read and write next value:
+  unsigned int idx;
+
+  // Buffer to hold our circular buffer of data:
+  unsigned int buff[N_DELAY];
+  
+};
+
+struct Thresher
+{
+public:
+  /*
+     Thresher constructor.
+
+     absThresh - Static threshold. If the ADC is below this value. Call it on.
+
+     relThresh -  Relative threshold. If we see the signal drop by this much over
+                  N_DELAY samples, we also declare the button on. Helps with light
+                  taps.
+  */
+  Thresher(unsigned int absThresh, long relThresh) :
+    absThresh(absThresh), relThresh(relThresh)
+  {}
+
+  // Disallow copying and assignment. Prevents accidental oopsies.
+  Thresher(const Thresher&) = delete;
+  Thresher & operator=(const Thresher&) = delete;
+
+  bool next(unsigned int x)
+  {
+    // Get the same from N_DELAY samples ago, and push the current sample into the
+    // delay line:
+    long delayed = delayLine.next(x);
+
+    // Convert to signed long, so we can subtract and get a happily signed result:
+    long longX = x;
+
+    // Different between same from N_DELAY ago and current sample:
+    long diff = delayed - longX;
+
+    // Check if the button is one:
+    bool on = false;
+    if (x < absThresh)
+    {
+#ifdef THRESH_DEBUG
+      Serial.printf("%lu ABS THRESH ON\n", millis());
+#endif
+      on = true;
+    }
+    if (diff > relThresh)
+    {
+#ifdef THRESH_DEBUG
+      Serial.printf("%lu REL THRESH ON\n", millis());
+#endif
+      on = true;
+    }
+
+    return on;
+  }
+
+private:
+
+  // Static threshold. If the ADC is below this value. Call it on:
+  unsigned int absThresh;
+  
+  // Realtive threshold. If we see the signal drop by this much over N_DELAY
+  // samples, we also declare the button on. Helps with light taps.
+  long relThresh;
+  DelayLine delayLine;
+};
 
 /*
    Button class. Handles updating buttons.
 */
-class Button
+struct Button
 {
-  public:
-    /*
-       Button constructor.
-
-       adcPin - analog to digital convertor pin number
-
-       thresh - threshold. If ADC value falls below this, then we say that the
-                button is down.
-
-       joystickButton - Which joystick buton to press when this ADC pin is
-                pressed.
-    */
-    Button(int adcPin, int thresh, int joystickButton) :
-      adcPin(adcPin), thresh(thresh),
-      joystickButton(joystickButton)
-    {}
-
-    /*
-       Static method to setup things before calling the update methods.
-    */
-    static void preUpdate()
-    {
-      led = false;
-
-#ifdef BUTTON_DEBUG
-      // Print out the time value to for the first CSV value:
-      Serial.print(millis());
-#endif
-      
-    }
-
-    /*
-       Update method. Chec the ADC, and press/unpress the button as appropirate.
-    */
-    void update()
-    {
-      // Read the ADC:
-      int adc = analogRead(adcPin);
-
-#ifdef BUTTON_DEBUG
-      // Print CSV data to the serial port, Using Serial.print instead of Serial.printf
-      // because it saves considerable space! Program storage went from 23% to 76% when
-      // I tried printf.
-      Serial.print(adc);
-      Serial.print(",");
-#endif
-
-      // If the value is below thresh, push the button, otherwise don't.
-      Joystick.button(joystickButton, adc < thresh);
-
-      // Update the LED state:
-      Button::led |= adc < thresh;
-    }
-
-    /*
-       Static method for after update stuff.
-    */
-    static void postUpdate()
-    {
-      // Actually update the joystick state:
-      Joystick.send_now();
-
-      // Update the LED. On if something is pressed, off otherwise:
-      digitalWrite(LedPin, led);
-#ifdef BUTTON_DEBUG
-      // Print out the endline for the serial port CSV data:
-      Serial.print("\n");
-#endif
-    }
-
-  private:
-    // ADC pin number:
-    int adcPin;
-
-    // Threshold for button up/down:
-    int thresh;
-
-    // Joystick button to press when our input button is down:
-    int joystickButton;
-
 public:
-    static bool led;
+  /*
+     Button constructor.
+
+     adcPin - analog to digital convertor pin number
+
+     thresh - see Thresher
+
+     diffThresh - see Thresher.
+
+     joystickButton - Which joystick buton to press when this ADC pin is
+              pressed.
+  */
+  Button(int adcPin, unsigned int absThresh, long relThresh, int joystickButton) :
+    adcPin(adcPin), joystickButton(joystickButton), buttabsThresher(absThresh, relThresh)
+  {}
+
+  // Disallow copying and assignment. Prevents accidental oopsies.
+  Button(const Button&) = delete;
+  Button & operator=(const Button&) = delete;
+
+  /*
+     Static method to setup things before calling the update methods.
+  */
+  static void preUpdate()
+  {
+    // Turn off the LED:
+    led = false;
+
+#ifdef BUTTON_DEBUG
+    // Print out the time value to for the first CSV value. Note, Serial.print() 
+    // printed the wrong value.
+    Serial.printf("%lu,", millis());
+#endif
+    
+  }
+
+  /*
+     Update method. Check the ADC, and press/unpress the button as appropirate.
+  */
+  void update()
+  {
+    
+    // Read the ADC:
+    int adc = analogRead(adcPin);
+
+    // Check the thresh, to see if we should turn the button on:
+    bool on = buttabsThresher.next(adc);
+
+    // Set the joystick button (doesn't actually update until the postUpdate
+    // call).
+    Joystick.button(joystickButton, on);
+
+    // Update the LED state:
+    led |= on;
+
+#ifdef BUTTON_DEBUG
+    // Print the ADC value:
+    Serial.printf("%d,", adc);
+#endif
+  }
+
+  /*
+     Static method for after update stuff.
+  */
+  static void postUpdate()
+  {
+    // Actually update the joystick state. Sending them all at once is way faster.
+    Joystick.send_now();
+
+    // Update the LED. On if something is pressed, off otherwise:
+    digitalWrite(LedPin, led);
+    
+#ifdef BUTTON_DEBUG
+    // Print out the endline for the serial port CSV data:
+    Serial.print("\n");
+#endif
+  }
+
+private:
+
+  // ADC pin number:
+  int adcPin;
+
+  // Joystick button to press when our input button is down:
+  int joystickButton;
+
+  // Object which does the 
+  Thresher buttabsThresher;
 };
 
-bool Button::led = false;
 
-// Define the buttons (analog input pin, joystick button, threshold):
-//#define PAD_WITH_TOP_CONNECTION 1
-#define PAD_WITH_SIDE_CONNECTION
+// I have two pads. One has connections on top, and one on the side. I accidentaly
+// wired them up differently, so the have different analog input pins. Oops.
+#define PAD_WITH_TOP_CONNECTION 1
+//#define PAD_WITH_SIDE_CONNECTION
 
-#ifdef PAD_WITH_SIDE_CONNECTION
-Button buttons[] = {
-  {A0, 200, 1},
-  {A2, 200, 2},
-  {A3, 200, 3},
-  {A5, 200, 4},
-  {A6, 200, 5},
-  {A8, 200, 6}
+// Define the buttons (analog input pin, abs thresh, rel thresh, joystick button):
+#ifdef PAD_WITH_SIDE_CONNECTION 
+Button buttons[] =
+{
+  {A0, 400, 200, 1},
+  {A2, 400, 200, 2},
+  {A3, 400, 200, 3},
+  {A5, 400, 200, 4},
+  {A6, 400, 200, 5},
+  {A8, 400, 200, 6}
 };
 #elif PAD_WITH_TOP_CONNECTION
-Button buttons[] = {
-  {A1, 200, 1},
-  {A2, 200, 2},
-  {A4, 200, 3},
-  {A5, 200, 4},
-  {A6, 200, 5},
-  {A8, 200, 6}
+Button buttons[] =
+{
+  {A1, 400, 200, 1},
+  {A2, 400, 200, 2},
+  {A4, 400, 200, 3},
+  {A5, 400, 200, 4},
+  {A6, 400, 200, 5},
+  {A8, 400, 200, 6}
 };
 #endif
 
-void setup() {
-  // put your setup code here, to run once:
+// Arduion setup function
+void setup()
+{
+  // Setup the LedPin to be an output, so we can turn the LED on/off:
   pinMode(LedPin, OUTPUT);
 
   // Set sendstate to flase. This prevents the Joystick library from updating the state on every
@@ -128,34 +250,19 @@ void setup() {
   Joystick.useManualSend(true);
 }
 
-// Next time we are due for an update.
-unsigned long nextUpdateMs = 1;
-
-#define AFAP
-
-void loop() {
-
-#ifndef AFAP
-  // Check the update interval. If not time, loop around again.
-
-  int updateIntervalMs = 1;
-
-  // Get the current time in milliseonds since epoch:
-  unsigned long ms = millis();
-  if (ms < nextUpdateMs)
-    return;
-
-  while (nextUpdateMs <= ms)
-    nextUpdateMs += updateIntervalMs;
-#endif
-
-  // Update all the buttons:
+void loop()
+{
+  // Do the pre-udpate step:
   Button::preUpdate();
 
-  for (auto button : buttons)
-  {
+  // Loop over the buttons, and update each one. Don't forget the &! Without that, instead of
+  // a reference, we get a copy of the buttons. Since our buttons need to store state in their
+  // delay line, calling update on a copy is no good, since the copy gets updated, instead of
+  // the real object. I spent like half a day realizing that. I should make the copy
+  // constructors private.
+  for (auto& button : buttons)
     button.update();
-  }
-  
+
+  // Post-update step:
   Button::postUpdate();
 }
